@@ -31,7 +31,7 @@ type argContainer struct {
 	longnames, allow_other, reverse, aessiv, nonempty, raw64,
 	noprealloc, speed, hkdf, serialize_reads, hh, info,
 	sharedstorage, fsck, one_file_system, deterministic_names,
-	xchacha, noxattr bool
+	xchacha, noxattr, initmount bool
 	// Mount options with opposites
 	dev, nodev, suid, nosuid, exec, noexec, rw, ro, kernel_cache, acl bool
 	masterkey, mountpoint, cipherdir, cpuprofile,
@@ -59,6 +59,10 @@ type argContainer struct {
 	_forceOwner *fuse.Owner
 	// _explicitScryptn is true then the user passed "-scryptn=xyz"
 	_explicitScryptn bool
+	// _masterkeyIsFromStdin if true then cli params included -masterkey=stdin
+	_masterkeyIsFromStdin bool
+	// _savedPassword used to avoid repeated password entry requests for -initmount option
+	_savedPassword []byte
 }
 
 var flagSet *flag.FlagSet
@@ -189,6 +193,7 @@ func parseCliOpts(osArgs []string) (args argContainer) {
 	flagSet.BoolVar(&args.deterministic_names, "deterministic-names", false, "Disable diriv file name randomisation")
 	flagSet.BoolVar(&args.xchacha, "xchacha", false, "Use XChaCha20-Poly1305 file content encryption")
 	flagSet.BoolVar(&args.noxattr, "noxattr", false, "Disable extended attribute operations")
+	flagSet.BoolVar(&args.initmount, "initmount", false, "Perform init then immediate mount")
 
 	// Mount options with opposites
 	flagSet.BoolVar(&args.dev, "dev", false, "Allow device files")
@@ -332,6 +337,9 @@ func countOpFlags(args *argContainer) int {
 		count++
 	}
 	if args.init {
+		count++
+	}
+	if args.initmount {
 		count++
 	}
 	if args.fsck {

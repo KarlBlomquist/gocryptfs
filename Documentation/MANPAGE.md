@@ -637,7 +637,7 @@ The memory usage for *scrypt* during mounting is as follows:
     27          128 
     28          256 
 
-Applies to: `-init`, `-passwd`
+Applies to: `-init`, `-initmount`, `-passwd`
 
 See also: the benchmarks in the gocryptfs source code in internal/configfile.
 
@@ -738,6 +738,13 @@ Mount an encrypted view of joe's home directory using reverse mode:
 	mkdir /home/joe.crypt
 	gocryptfs -init -reverse /home/joe
 	gocryptfs -reverse /home/joe /home/joe.crypt
+
+### Init & Mount all in one
+
+Create an encrypted filesystem in directory "mydir.crypt", mount it on "mydir":
+
+	mkdir mydir.crypt mydir
+	gocryptfs -initmount mydir.crypt mydir
 
 ### fstab
 

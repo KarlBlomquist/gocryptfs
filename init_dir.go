@@ -95,6 +95,10 @@ func initDir(args *argContainer) {
 			fido2HmacSalt = nil
 		}
 		creator := tlog.ProgramName + " " + GitVersion
+		if args.initmount {
+			args._savedPassword = make([]byte, len(password))
+			copy(args._savedPassword, password)
+		}
 		err = configfile.Create(&configfile.CreateArgs{
 			Filename:           args.config,
 			Password:           password,
@@ -151,6 +155,8 @@ func initDir(args *argContainer) {
 	if strings.Contains(friendlyPath, " ") {
 		friendlyPath = "\"" + friendlyPath + "\""
 	}
-	tlog.Info.Printf(tlog.ColorGrey+"You can now mount it using: %s%s %s MOUNTPOINT"+tlog.ColorReset,
-		tlog.ProgramName, mountArgs, friendlyPath)
+	if !args.initmount {
+		tlog.Info.Printf(tlog.ColorGrey+"You can now mount it using: %s%s %s MOUNTPOINT"+tlog.ColorReset,
+			tlog.ProgramName, mountArgs, friendlyPath)
+	}
 }

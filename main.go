@@ -45,10 +45,14 @@ func loadConfig(args *argContainer) (masterkey []byte, cf *configfile.ConfFile, 
 		}
 		pw = fido2.Secret(args.fido2, cf.FIDO2.AssertOptions, cf.FIDO2.CredentialID, cf.FIDO2.HMACSalt)
 	} else {
-		pw, err = readpassword.Once([]string(args.extpass), []string(args.passfile), "")
-		if err != nil {
-			tlog.Fatal.Println(err)
-			return nil, nil, exitcodes.NewErr("", exitcodes.ReadPassword)
+		if len(args._savedPassword) == 0 {
+			pw, err = readpassword.Once([]string(args.extpass), []string(args.passfile), "")
+			if err != nil {
+				tlog.Fatal.Println(err)
+				return nil, nil, exitcodes.NewErr("", exitcodes.ReadPassword)
+			}
+		} else {
+			pw = args._savedPassword;
 		}
 	}
 	tlog.Info.Println("Decrypting master key")
@@ -273,12 +277,17 @@ func main() {
 		return
 	}
 	if nOps > 1 {
-		tlog.Fatal.Printf("At most one of -info, -init, -passwd, -fsck is allowed")
+		tlog.Fatal.Printf("At most one of -info, -init, -initmount, -passwd, -fsck is allowed")
 		os.Exit(exitcodes.Usage)
 	}
-	if flagSet.NArg() != 1 {
-		tlog.Fatal.Printf("The options -info, -init, -passwd, -fsck take exactly one argument, %d given",
+	if flagSet.NArg() != 1 && !args.initmount || flagSet.NArg() != 2 && args.initmount {
+		if args.initmount {
+			tlog.Fatal.Printf("The option -initmount takes exactly two arguments, %d given",
 			flagSet.NArg())
+		} else {
+			tlog.Fatal.Printf("The options -info, -init, -passwd, -fsck take exactly one argument, %d given",
+			flagSet.NArg())
+		}
 		os.Exit(exitcodes.Usage)
 	}
 	// "-info"
@@ -286,10 +295,15 @@ func main() {
 		info(args.config)
 		os.Exit(0)
 	}
-	// "-init"
-	if args.init {
+	// "-init" , -initmount"
+	if args.init || args.initmount {
 		initDir(&args)
-		os.Exit(0)
+		if args.initmount {
+			doMount(&args)
+			return
+		} else {
+			os.Exit(0)
+		}
 	}
 	// "-passwd"
 	if args.passwd {

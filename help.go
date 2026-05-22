@@ -29,6 +29,7 @@ Common Options (use -hh to show all):
   -h, -help          This short help text
   -hh                Long help text with all options
   -init              Initialize encrypted directory
+  -initmount         Initialize then mount encrypted directory
   -info              Display information about encrypted directory
   -masterkey         Mount with explicit master key instead of password
   -nonempty          Allow mounting over non-empty directory

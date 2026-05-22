@@ -44,11 +44,13 @@ func handleArgsMasterkey(args *argContainer) (masterkey []byte) {
 			tlog.Fatal.Println(err)
 			os.Exit(exitcodes.ReadPassword)
 		}
+		args._masterkeyIsFromStdin = true
+		args.masterkey = string(in)
 		return unhexMasterKey(string(in), true)
 	}
 	// "-masterkey=941a6029-3adc6a1c-..."
 	if args.masterkey != "" {
-		return unhexMasterKey(args.masterkey, false)
+		return unhexMasterKey(args.masterkey, args._masterkeyIsFromStdin || false)
 	}
 	// "-zerokey"
 	if args.zerokey {
