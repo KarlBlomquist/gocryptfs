@@ -112,6 +112,53 @@ func TestInitMasterkey(t *testing.T) {
 	}
 }
 
+// Test -initmount with -extpass
+func TestInitMountExtPass(t *testing.T) {
+	print("TestInitMountExtPass\n")
+	dir, err := os.MkdirTemp(test_helpers.TmpDir, t.Name()+".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mnt := dir + ".mnt"
+	test_helpers.MountOrFatal(t, dir, mnt, "-initmount", "-extpass=echo test")
+	defer test_helpers.UnmountPanic(mnt)
+
+	_, err = os.Stat(dir + "/" + configfile.ConfDefaultName)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = os.WriteFile(mnt+"/file", []byte("somecontent"), 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	print("TestInitMountExtPass ok\n")
+}
+kmvopoe-9f-2
+// Test -initmount with -masterkey and -extpass
+func TestInitMountMasterKey(t *testing.T) {
+	print("TestInitMountMasterKey\n")
+	dir, err := os.MkdirTemp(test_helpers.TmpDir, t.Name()+".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mnt := dir + ".mnt"
+	var testMk = make([]byte, 32)
+	test_helpers.MountOrFatal(t, dir, mnt, "-initmount", `-extpass="echo test"`, fmt.Sprintf("-masterkey=%s", hex.EncodeToString(testMk)))
+	defer test_helpers.UnmountPanic(mnt)
+
+	_, err = os.Stat(dir + "/" + configfile.ConfDefaultName)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = os.WriteFile(mnt+"/file", []byte("somecontent"), 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	print("TestInitMountMasterKey ok\n")
+}
+
 // testPasswd changes the password from "test" to "test" using
 // the -extpass method, then from "test" to "newpasswd" using the
 // stdin method.
@@ -556,7 +603,7 @@ func TestMountBackground(t *testing.T) {
 // user. Only one operation flag is allowed.
 func TestMultipleOperationFlags(t *testing.T) {
 	// Test all combinations
-	opFlags := []string{"-init", "-info", "-passwd", "-fsck"}
+	opFlags := []string{"-init", "-initmount", "-info", "-passwd", "-fsck"}
 	for _, flag1 := range opFlags {
 		var flag2 string
 		for _, flag2 = range opFlags {
@@ -572,6 +619,23 @@ func TestMultipleOperationFlags(t *testing.T) {
 				t.Fatalf("this should have failed with code %d, but returned %d",
 					exitcodes.Usage, exitCode)
 			}
+		}
+	}
+}
+
+// Test that wrong argument counts for -initmount trigger the usage exit code.
+func TestInitMountArgCount(t *testing.T) {
+	tests := [][]string{
+		{"-initmount", "/tmp"},
+		{"-initmount", "/tmp", "/tmp/mnt", "/tmp/extra"},
+	}
+	for _, args := range tests {
+		cmd := exec.Command(test_helpers.GocryptfsBinary, args...)
+		err := cmd.Run()
+		exitCode := test_helpers.ExtractCmdExitCode(err)
+		if exitCode != exitcodes.Usage {
+			t.Fatalf("args %v should have failed with code %d, but returned %d",
+				args, exitcodes.Usage, exitCode)
 		}
 	}
 }
