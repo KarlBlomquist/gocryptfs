@@ -114,13 +114,12 @@ func TestInitMasterkey(t *testing.T) {
 
 // Test -initmount with -extpass
 func TestInitMountExtPass(t *testing.T) {
-	print("TestInitMountExtPass\n")
 	dir, err := os.MkdirTemp(test_helpers.TmpDir, t.Name()+".")
 	if err != nil {
 		t.Fatal(err)
 	}
 	mnt := dir + ".mnt"
-	test_helpers.MountOrFatal(t, dir, mnt, "-initmount", "-extpass=echo test")
+	test_helpers.MountOrFatal(t, dir, mnt, "-initmount", "-extpass", "echo test")
 	defer test_helpers.UnmountPanic(mnt)
 
 	_, err = os.Stat(dir + "/" + configfile.ConfDefaultName)
@@ -132,19 +131,17 @@ func TestInitMountExtPass(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	print("TestInitMountExtPass ok\n")
 }
-kmvopoe-9f-2
-// Test -initmount with -masterkey and -extpass
+
+// Test -initmount with explicit -masterkey and -extpass
 func TestInitMountMasterKey(t *testing.T) {
-	print("TestInitMountMasterKey\n")
 	dir, err := os.MkdirTemp(test_helpers.TmpDir, t.Name()+".")
 	if err != nil {
 		t.Fatal(err)
 	}
 	mnt := dir + ".mnt"
 	var testMk = make([]byte, 32)
-	test_helpers.MountOrFatal(t, dir, mnt, "-initmount", `-extpass="echo test"`, fmt.Sprintf("-masterkey=%s", hex.EncodeToString(testMk)))
+	test_helpers.MountOrFatal(t, dir, mnt, "-initmount", "-extpass", "echo test", fmt.Sprintf("-masterkey=%s", hex.EncodeToString(testMk)))
 	defer test_helpers.UnmountPanic(mnt)
 
 	_, err = os.Stat(dir + "/" + configfile.ConfDefaultName)
@@ -156,7 +153,6 @@ func TestInitMountMasterKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	print("TestInitMountMasterKey ok\n")
 }
 
 // testPasswd changes the password from "test" to "test" using
