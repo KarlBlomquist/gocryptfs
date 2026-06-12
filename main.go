@@ -142,178 +142,218 @@ func main() {
 	// Show microseconds in go-fuse debug output (-fusedebug)
 	log.SetFlags(log.Lmicroseconds)
 	var err error
-	// Handle the combined "-init ... -mount ..." invocation before the normal
-	// flow. It splits the command line into an init phase and a mount phase and
-	// processes each as if it were a separate gocryptfs call.
-	if initMountPos, ok := detectInitMount(os.Args); ok {
-		os.Exit(doInitAndMount(os.Args, initMountPos))
-	}
-	// Parse all command-line options (i.e. arguments starting with "-")
-	// into "args". Path arguments are parsed below.
-	args := parseCliOpts(os.Args)
-	// "-mount" is only meaningful together with "-init" (handled above).
-	if args.mount {
-		tlog.Fatal.Printf("-mount is only valid in combination with -init (see -hh)")
+
+	// Detect a combined "-init ... -mount ..." invocation. It is processed in
+	// two passes through the same code below: first the init section, then the
+	// mount section. This reuses the normal argument and action processing
+	// instead of duplicating it.
+	combinedPos, combined := detectInitMount(os.Args)
+	if combined && combinedPos.mountPos < combinedPos.initPos {
+		tlog.Fatal.Printf("-init must come before -mount on the command line")
 		os.Exit(exitcodes.Usage)
 	}
-	// Fork a child into the background if "-fg" is not set AND we are mounting
-	// a filesystem. The child will do all the work.
-	if !args.fg && flagSet.NArg() == 2 {
-		ret := forkChild()
-		os.Exit(ret)
+	// osArgs holds the argument set for the current pass. For a normal call it
+	// is os.Args; for a combined call the first pass uses the init section.
+	osArgs := os.Args
+	if combined {
+		osArgs = initSectionArgs(os.Args, combinedPos)
 	}
-	if args.debug {
-		tlog.Debug.Enabled = true
-	}
-	tlog.Debug.Printf("cli args: %q", os.Args)
-	// "-v"
-	if args.version {
-		tlog.Debug.Printf("openssl=%v\n", args.openssl)
-		tlog.Debug.Printf("on-disk format %d\n", contentenc.CurrentVersion)
-		printVersion()
-		os.Exit(0)
-	}
-	// "-hh"
-	if args.hh {
-		helpLong()
-		os.Exit(0)
-	}
-	// "-speed"
-	if args.speed {
-		printVersion()
-		speed.Run()
-		os.Exit(0)
-	}
-	if args.wpanic {
-		tlog.Warn.Wpanic = true
-		tlog.Debug.Printf("Panicking on warnings")
-	}
-	// Every operation below requires CIPHERDIR. Exit if we don't have it.
-	if flagSet.NArg() == 0 {
-		if flagSet.NFlag() == 0 {
-			// Naked call to "gocryptfs". Just print the help text.
-			helpShort()
-		} else {
-			// The user has passed some flags, but CIPHERDIR is missing. State
-			// what is wrong.
-			tlog.Fatal.Printf("CIPHERDIR argument is missing")
+	// State carried from the init pass to the mount pass (combined mode only).
+	var savedPassword []byte
+	var initMasterkey string
+
+	for pass := 0; ; pass++ {
+		initPass := combined && pass == 0
+		mountPass := combined && pass == 1
+
+		// Parse all command-line options (i.e. arguments starting with "-")
+		// into "args". Path arguments are parsed below.
+		args := parseCliOpts(osArgs)
+		// "-mount" is only meaningful together with "-init" (combined mode).
+		if args.mount && !combined {
+			tlog.Fatal.Printf("-mount is only valid in combination with -init (see -hh)")
+			os.Exit(exitcodes.Usage)
 		}
-		os.Exit(exitcodes.Usage)
-	}
-	// Check that CIPHERDIR exists
-	args.cipherdir, _ = filepath.Abs(flagSet.Arg(0))
-	err = isDir(args.cipherdir)
-	if err != nil {
-		tlog.Fatal.Printf("Invalid cipherdir: %v", err)
-		os.Exit(exitcodes.CipherDir)
-	}
-	// "-q"
-	if args.quiet {
-		tlog.Info.Enabled = false
-	}
-	// "-reverse" implies "-aessiv"
-	if args.reverse {
-		args.aessiv = true
-	} else {
-		if args.exclude != nil {
-			tlog.Fatal.Printf("-exclude only works in reverse mode")
-			os.Exit(exitcodes.ExcludeError)
+		// In the combined mount pass, reuse the password captured during init
+		// for the foreground (non-forked) mount path.
+		if mountPass {
+			args._savedPassword = savedPassword
 		}
-	}
-	// "-config"
-	if args.config != "" {
-		args.config, err = filepath.Abs(args.config)
+		// Fork a child into the background if "-fg" is not set AND we are
+		// mounting a filesystem. The child will do all the work. In the
+		// combined mount pass the saved init password is handed to the child
+		// via its stdin.
+		if !args.fg && flagSet.NArg() == 2 {
+			var childPw []byte
+			if mountPass {
+				childPw = savedPassword
+			}
+			ret := forkChild(osArgs, childPw)
+			os.Exit(ret)
+		}
+		if args.debug {
+			tlog.Debug.Enabled = true
+		}
+		tlog.Debug.Printf("cli args: %q", osArgs)
+		// "-v"
+		if args.version {
+			tlog.Debug.Printf("openssl=%v\n", args.openssl)
+			tlog.Debug.Printf("on-disk format %d\n", contentenc.CurrentVersion)
+			printVersion()
+			os.Exit(0)
+		}
+		// "-hh"
+		if args.hh {
+			helpLong()
+			os.Exit(0)
+		}
+		// "-speed"
+		if args.speed {
+			printVersion()
+			speed.Run()
+			os.Exit(0)
+		}
+		if args.wpanic {
+			tlog.Warn.Wpanic = true
+			tlog.Debug.Printf("Panicking on warnings")
+		}
+		// Every operation below requires CIPHERDIR. Exit if we don't have it.
+		if flagSet.NArg() == 0 {
+			if flagSet.NFlag() == 0 {
+				// Naked call to "gocryptfs". Just print the help text.
+				helpShort()
+			} else {
+				// The user has passed some flags, but CIPHERDIR is missing.
+				// State what is wrong.
+				tlog.Fatal.Printf("CIPHERDIR argument is missing")
+			}
+			os.Exit(exitcodes.Usage)
+		}
+		// Check that CIPHERDIR exists
+		args.cipherdir, _ = filepath.Abs(flagSet.Arg(0))
+		err = isDir(args.cipherdir)
 		if err != nil {
-			tlog.Fatal.Printf("Invalid \"-config\" setting: %v", err)
-			os.Exit(exitcodes.Init)
+			tlog.Fatal.Printf("Invalid cipherdir: %v", err)
+			os.Exit(exitcodes.CipherDir)
 		}
-		tlog.Info.Printf("Using config file at custom location %s", args.config)
-		args._configCustom = true
-	} else if args.reverse {
-		args.config = filepath.Join(args.cipherdir, configfile.ConfReverseName)
-	} else {
-		args.config = filepath.Join(args.cipherdir, configfile.ConfDefaultName)
-	}
-	// "-force_owner"
-	if args.force_owner != "" {
-		var uidNum, gidNum int64
-		ownerPieces := strings.SplitN(args.force_owner, ":", 2)
-		if len(ownerPieces) != 2 {
-			tlog.Fatal.Printf("force_owner must be in form UID:GID")
+		// "-q"
+		if args.quiet {
+			tlog.Info.Enabled = false
+		}
+		// "-reverse" implies "-aessiv"
+		if args.reverse {
+			args.aessiv = true
+		} else {
+			if args.exclude != nil {
+				tlog.Fatal.Printf("-exclude only works in reverse mode")
+				os.Exit(exitcodes.ExcludeError)
+			}
+		}
+		// "-config"
+		if args.config != "" {
+			args.config, err = filepath.Abs(args.config)
+			if err != nil {
+				tlog.Fatal.Printf("Invalid \"-config\" setting: %v", err)
+				os.Exit(exitcodes.Init)
+			}
+			tlog.Info.Printf("Using config file at custom location %s", args.config)
+			args._configCustom = true
+		} else if args.reverse {
+			args.config = filepath.Join(args.cipherdir, configfile.ConfReverseName)
+		} else {
+			args.config = filepath.Join(args.cipherdir, configfile.ConfDefaultName)
+		}
+		// "-force_owner"
+		if args.force_owner != "" {
+			var uidNum, gidNum int64
+			ownerPieces := strings.SplitN(args.force_owner, ":", 2)
+			if len(ownerPieces) != 2 {
+				tlog.Fatal.Printf("force_owner must be in form UID:GID")
+				os.Exit(exitcodes.Usage)
+			}
+			uidNum, err = strconv.ParseInt(ownerPieces[0], 0, 32)
+			if err != nil || uidNum < 0 {
+				tlog.Fatal.Printf("force_owner: Unable to parse UID %v as positive integer", ownerPieces[0])
+				os.Exit(exitcodes.Usage)
+			}
+			gidNum, err = strconv.ParseInt(ownerPieces[1], 0, 32)
+			if err != nil || gidNum < 0 {
+				tlog.Fatal.Printf("force_owner: Unable to parse GID %v as positive integer", ownerPieces[1])
+				os.Exit(exitcodes.Usage)
+			}
+			args._forceOwner = &fuse.Owner{Uid: uint32(uidNum), Gid: uint32(gidNum)}
+		}
+		// "-cpuprofile"
+		if args.cpuprofile != "" {
+			onExitFunc := setupCpuprofile(args.cpuprofile)
+			defer onExitFunc()
+		}
+		// "-memprofile"
+		if args.memprofile != "" {
+			onExitFunc := setupMemprofile(args.memprofile)
+			defer onExitFunc()
+		}
+		// "-trace"
+		if args.trace != "" {
+			onExitFunc := setupTrace(args.trace)
+			defer onExitFunc()
+		}
+		if args.cpuprofile != "" || args.memprofile != "" || args.trace != "" {
+			tlog.Info.Printf("Note: You must unmount gracefully, otherwise the profile file(s) will stay empty!\n")
+		}
+		// Operation flags
+		nOps := countOpFlags(&args)
+		if nOps == 0 {
+			// Default operation: mount.
+			if flagSet.NArg() != 2 {
+				prettyArgs := prettyArgs()
+				tlog.Info.Printf("Wrong number of arguments (have %d, want 2). You passed: %s",
+					flagSet.NArg(), prettyArgs)
+				tlog.Fatal.Printf("Usage: %s [OPTIONS] CIPHERDIR MOUNTPOINT [-o COMMA-SEPARATED-OPTIONS]", tlog.ProgramName)
+				os.Exit(exitcodes.Usage)
+			}
+			doMount(&args)
+			// Don't call os.Exit to give deferred functions a chance to run.
+			// In combined mode the mount is always the final pass.
+			return
+		}
+		if nOps > 1 {
+			tlog.Fatal.Printf("At most one of -info, -init, -passwd, -fsck is allowed")
 			os.Exit(exitcodes.Usage)
 		}
-		uidNum, err = strconv.ParseInt(ownerPieces[0], 0, 32)
-		if err != nil || uidNum < 0 {
-			tlog.Fatal.Printf("force_owner: Unable to parse UID %v as positive integer", ownerPieces[0])
+		if flagSet.NArg() != 1 {
+			tlog.Fatal.Printf("The options -info, -init, -passwd, -fsck take exactly one argument, %d given",
+				flagSet.NArg())
 			os.Exit(exitcodes.Usage)
 		}
-		gidNum, err = strconv.ParseInt(ownerPieces[1], 0, 32)
-		if err != nil || gidNum < 0 {
-			tlog.Fatal.Printf("force_owner: Unable to parse GID %v as positive integer", ownerPieces[1])
-			os.Exit(exitcodes.Usage)
+		// "-info"
+		if args.info {
+			info(args.config)
+			os.Exit(0)
 		}
-		args._forceOwner = &fuse.Owner{Uid: uint32(uidNum), Gid: uint32(gidNum)}
-	}
-	// "-cpuprofile"
-	if args.cpuprofile != "" {
-		onExitFunc := setupCpuprofile(args.cpuprofile)
-		defer onExitFunc()
-	}
-	// "-memprofile"
-	if args.memprofile != "" {
-		onExitFunc := setupMemprofile(args.memprofile)
-		defer onExitFunc()
-	}
-	// "-trace"
-	if args.trace != "" {
-		onExitFunc := setupTrace(args.trace)
-		defer onExitFunc()
-	}
-	if args.cpuprofile != "" || args.memprofile != "" || args.trace != "" {
-		tlog.Info.Printf("Note: You must unmount gracefully, otherwise the profile file(s) will stay empty!\n")
-	}
-	// Operation flags
-	nOps := countOpFlags(&args)
-	if nOps == 0 {
-		// Default operation: mount.
-		if flagSet.NArg() != 2 {
-			prettyArgs := prettyArgs()
-			tlog.Info.Printf("Wrong number of arguments (have %d, want 2). You passed: %s",
-				flagSet.NArg(), prettyArgs)
-			tlog.Fatal.Printf("Usage: %s [OPTIONS] CIPHERDIR MOUNTPOINT [-o COMMA-SEPARATED-OPTIONS]", tlog.ProgramName)
-			os.Exit(exitcodes.Usage)
+		// "-init"
+		if args.init {
+			initDir(&args)
+			if initPass {
+				// Combined mode: capture the password and masterkey for the
+				// mount pass, build the mount-section argument set, and
+				// continue WITHOUT exiting so the mount pass runs next.
+				savedPassword = args._savedPassword
+				initMasterkey = args.masterkey
+				osArgs = buildMountArgs(os.Args, combinedPos, args.cipherdir, initMasterkey)
+				continue
+			}
+			os.Exit(0)
 		}
-		doMount(&args)
-		// Don't call os.Exit to give deferred functions a chance to run
-		return
-	}
-	if nOps > 1 {
-		tlog.Fatal.Printf("At most one of -info, -init, -passwd, -fsck is allowed")
-		os.Exit(exitcodes.Usage)
-	}
-	if flagSet.NArg() != 1 {
-		tlog.Fatal.Printf("The options -info, -init, -passwd, -fsck take exactly one argument, %d given",
-			flagSet.NArg())
-		os.Exit(exitcodes.Usage)
-	}
-	// "-info"
-	if args.info {
-		info(args.config)
-		os.Exit(0)
-	}
-	// "-init"
-	if args.init {
-		initDir(&args)
-		os.Exit(0)
-	}
-	// "-passwd"
-	if args.passwd {
-		changePassword(&args)
-		os.Exit(0)
-	}
-	// "-fsck"
-	if args.fsck {
-		code := fsck(&args)
-		os.Exit(code)
+		// "-passwd"
+		if args.passwd {
+			changePassword(&args)
+			os.Exit(0)
+		}
+		// "-fsck"
+		if args.fsck {
+			code := fsck(&args)
+			os.Exit(code)
+		}
 	}
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -105,16 +106,47 @@ func TestInitMountArgSplitting(t *testing.T) {
 		t.Fatal("expected combined mode to be detected")
 	}
 
-	initArgs := append([]string{osArgs[0]}, osArgs[pos.initPos:pos.mountPos]...)
+	initArgs := initSectionArgs(osArgs, pos)
 	wantInit := []string{"gocryptfs", "-init", "-q", "/cipher"}
 	if !reflect.DeepEqual(initArgs, wantInit) {
 		t.Errorf("initArgs: want=%v got=%v", wantInit, initArgs)
 	}
 
-	cipherdir := "/cipher"
-	mountArgs := append([]string{osArgs[0], cipherdir}, osArgs[pos.mountPos+1:]...)
+	mountArgs := buildMountArgs(osArgs, pos, "/cipher", "")
 	wantMount := []string{"gocryptfs", "/cipher", "/plain", "-fg", "-allow_other"}
 	if !reflect.DeepEqual(mountArgs, wantMount) {
 		t.Errorf("mountArgs: want=%v got=%v", wantMount, mountArgs)
+	}
+}
+
+// TestResolveMountMasterkeyReuse verifies that a bare "-masterkey" in the mount
+// section is rewritten to reuse the init masterkey value.
+func TestResolveMountMasterkeyReuse(t *testing.T) {
+	mk := strings.Repeat("11", 32)
+	got := resolveMountMasterkey([]string{"-masterkey", "/plain"}, mk)
+	want := []string{"-masterkey=" + mk, "/plain"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("want=%v got=%v", want, got)
+	}
+}
+
+// TestResolveMountMasterkeyExplicitMatch verifies that an explicit matching
+// "-masterkey=<key>" in the mount section is passed through unchanged.
+func TestResolveMountMasterkeyExplicitMatch(t *testing.T) {
+	mk := strings.Repeat("22", 32)
+	got := resolveMountMasterkey([]string{"-masterkey=" + mk, "/plain"}, mk)
+	want := []string{"-masterkey=" + mk, "/plain"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("want=%v got=%v", want, got)
+	}
+}
+
+// TestResolveMountMasterkeyNoMasterkey verifies the mount section is unchanged
+// when it contains no "-masterkey".
+func TestResolveMountMasterkeyNoMasterkey(t *testing.T) {
+	got := resolveMountMasterkey([]string{"/plain", "-fg"}, "")
+	want := []string{"/plain", "-fg"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("want=%v got=%v", want, got)
 	}
 }

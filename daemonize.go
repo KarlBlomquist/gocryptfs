@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -26,7 +27,13 @@ func exitOnUsr1() {
 // forkChild - execute ourselves once again, this time with the "-fg" flag, and
 // wait for SIGUSR1 or child exit.
 // This is a workaround for the missing true fork function in Go.
-func forkChild() int {
+//
+// osArgs is the command line to re-execute. For a normal mount it is os.Args;
+// for the mount pass of a combined "-init ... -mount ..." call it is the
+// rewritten mount command line. If password is non-nil it is written to the
+// child's stdin (and then wiped), so the child can reuse the password captured
+// during the init pass; otherwise the child inherits our stdin.
+func forkChild(osArgs []string, password []byte) int {
 	name := os.Args[0]
 	// Use the full path to our executable if we can get if from /proc.
 	buf := make([]byte, syscallcompat.PATH_MAX)
@@ -36,16 +43,36 @@ func forkChild() int {
 		tlog.Debug.Printf("forkChild: readlink worked: %q", name)
 	}
 	newArgs := []string{"-fg", fmt.Sprintf("-notifypid=%d", os.Getpid())}
-	newArgs = append(newArgs, os.Args[1:]...)
+	newArgs = append(newArgs, osArgs[1:]...)
 	c := exec.Command(name, newArgs...)
 	c.Stdout = os.Stdout
 	c.Stderr = os.Stderr
-	c.Stdin = os.Stdin
+	var childStdin io.WriteCloser
+	if password != nil {
+		// Hand the captured init password to the child through a stdin pipe.
+		// The child reads it via the normal stdin password path (a pipe is not
+		// a terminal).
+		childStdin, err = c.StdinPipe()
+		if err != nil {
+			tlog.Fatal.Printf("forkChild: stdin pipe failed: %v", err)
+			return exitcodes.ForkChild
+		}
+	} else {
+		c.Stdin = os.Stdin
+	}
 	exitOnUsr1()
 	err = c.Start()
 	if err != nil {
 		tlog.Fatal.Printf("forkChild: starting %s failed: %v", name, err)
 		return exitcodes.ForkChild
+	}
+	if childStdin != nil {
+		childStdin.Write(password)
+		childStdin.Write([]byte("\n"))
+		childStdin.Close()
+		for i := range password {
+			password[i] = 0
+		}
 	}
 	err = c.Wait()
 	if err != nil {

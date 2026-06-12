@@ -2,20 +2,18 @@ package main
 
 import (
 	"encoding/hex"
-	"fmt"
-	"io"
 	"os"
-	"os/exec"
-	"path/filepath"
 	"strings"
-	"syscall"
 
-	"github.com/rfjakob/gocryptfs/v2/internal/configfile"
 	"github.com/rfjakob/gocryptfs/v2/internal/cryptocore"
 	"github.com/rfjakob/gocryptfs/v2/internal/exitcodes"
-	"github.com/rfjakob/gocryptfs/v2/internal/syscallcompat"
 	"github.com/rfjakob/gocryptfs/v2/internal/tlog"
 )
+
+// This file holds the helpers for the combined "-init ... -mount ..."
+// invocation. The actual orchestration is a two-pass loop in main(): the first
+// pass processes the init section, the second pass processes the mount section,
+// both through the normal argument and action handling in main().
 
 // initMountPositions holds the index of the "-init" and "-mount" tokens in the
 // raw command line (os.Args).
@@ -50,38 +48,24 @@ func detectInitMount(osArgs []string) (pos initMountPositions, ok bool) {
 	return pos, pos.initPos >= 0 && pos.mountPos >= 0
 }
 
-// doInitAndMount processes a combined "-init ... -mount ..." command line.
-//
-// It builds two argument sets and runs each as if it were a separate gocryptfs
-// call, so options never leak between the two phases:
-//
-//  1. init phase  : everything from "-init" up to (but not including) "-mount".
-//  2. mount phase : a normal mount command line built by replacing the "-mount"
-//     token with the cipherdir from the init phase, keeping the plaintext
-//     mountpoint and all mount options that follow.
-//
-// The password entered during -init is reused for the mount phase. If the init
-// phase fails, initDir() calls os.Exit immediately, so the mount phase is never
-// reached. Returns the process exit code.
-func doInitAndMount(osArgs []string, pos initMountPositions) int {
-	// -init must come before -mount.
-	if pos.mountPos < pos.initPos {
-		tlog.Fatal.Printf("-init must come before -mount on the command line")
-		return exitcodes.Usage
-	}
-	// Phase 1: init. Arguments are [prog, -init, CIPHERDIR, <init-options>].
-	initArgs := append([]string{osArgs[0]}, osArgs[pos.initPos:pos.mountPos]...)
-	cipherdir, password, initMasterkey := runInitPhase(initArgs)
+// initSectionArgs returns the argument set for the init pass of a combined
+// call: [prog] followed by everything from "-init" up to (but not including)
+// "-mount".
+func initSectionArgs(osArgs []string, pos initMountPositions) []string {
+	return append([]string{osArgs[0]}, osArgs[pos.initPos:pos.mountPos]...)
+}
 
-	// Phase 2: mount. Replace the "-mount" token with the cipherdir from the
-	// init phase to form a normal mount command line:
-	//   [prog, CIPHERDIR, MOUNTPOINT, <mount-options>]
-	// A bare "-masterkey" in the mount section reuses the masterkey value from
-	// the init section; an explicit value must match it (see
-	// resolveMountMasterkey).
+// buildMountArgs constructs the argument set for the mount pass of a combined
+// call. It is a normal mount command line:
+//
+//	[prog, CIPHERDIR, MOUNTPOINT, <mount-options>]
+//
+// The "-mount" token is replaced by the cipherdir produced by the init pass,
+// and any "-masterkey" in the mount section is resolved against the init
+// masterkey (see resolveMountMasterkey).
+func buildMountArgs(osArgs []string, pos initMountPositions, cipherdir, initMasterkey string) []string {
 	mountSection := resolveMountMasterkey(osArgs[pos.mountPos+1:], initMasterkey)
-	mountArgs := append([]string{osArgs[0], cipherdir}, mountSection...)
-	return runMountPhase(mountArgs, password)
+	return append([]string{osArgs[0], cipherdir}, mountSection...)
 }
 
 // resolveMountMasterkey processes the "-masterkey" option found in the
@@ -181,154 +165,3 @@ func requireMatchingMasterkey(mountValue, initMasterkey string) {
 	}
 }
 
-// runInitPhase parses initArgs as a standalone init call and runs initDir. It
-// returns the absolute cipherdir, the password captured during init, and the
-// raw masterkey value passed via "-masterkey" (empty if none was given).
-// initDir calls os.Exit on any failure, satisfying "exit immediately if -init
-// fails".
-func runInitPhase(initArgs []string) (cipherdir string, password []byte, masterkey string) {
-	args := parseCliOpts(initArgs)
-	if !args.init {
-		tlog.Fatal.Printf("internal error: init phase parsed without -init")
-		os.Exit(exitcodes.Usage)
-	}
-	if args.debug {
-		tlog.Debug.Enabled = true
-	}
-	if args.quiet {
-		tlog.Info.Enabled = false
-	}
-	if flagSet.NArg() != 1 {
-		tlog.Fatal.Printf("-init takes exactly one argument (CIPHERDIR), %d given", flagSet.NArg())
-		os.Exit(exitcodes.Usage)
-	}
-	var err error
-	args.cipherdir, err = filepath.Abs(flagSet.Arg(0))
-	if err != nil {
-		tlog.Fatal.Printf("Invalid cipherdir: %v", err)
-		os.Exit(exitcodes.CipherDir)
-	}
-	// "-reverse" implies "-aessiv"
-	if args.reverse {
-		args.aessiv = true
-	}
-	// Determine the config file location, mirroring main().
-	if args.config != "" {
-		args.config, err = filepath.Abs(args.config)
-		if err != nil {
-			tlog.Fatal.Printf("Invalid \"-config\" setting: %v", err)
-			os.Exit(exitcodes.Init)
-		}
-		tlog.Info.Printf("Using config file at custom location %s", args.config)
-		args._configCustom = true
-	} else if args.reverse {
-		args.config = filepath.Join(args.cipherdir, configfile.ConfReverseName)
-	} else {
-		args.config = filepath.Join(args.cipherdir, configfile.ConfDefaultName)
-	}
-	// Runs the init; exits the process on failure.
-	initDir(&args)
-	return args.cipherdir, args._savedPassword, args.masterkey
-}
-
-// runMountPhase parses the normal mount command line and mounts the filesystem,
-// reusing the password captured during init. If the mount section did not
-// request "-fg", it daemonizes (forks a child that mounts in the foreground).
-// In both cases the mount runs as a separate, normal gocryptfs invocation; the
-// init password is handed over through the child's stdin. Returns the exit code.
-func runMountPhase(mountArgs []string, password []byte) int {
-	args := parseCliOpts(mountArgs)
-	if flagSet.NArg() != 2 {
-		tlog.Fatal.Printf("mount phase requires a MOUNTPOINT after -mount")
-		return exitcodes.Usage
-	}
-	if args.fg {
-		return execMountForeground(mountArgs, password)
-	}
-	return forkChildMount(mountArgs, password)
-}
-
-// selfPath returns the path to the running gocryptfs executable.
-func selfPath() string {
-	name := os.Args[0]
-	buf := make([]byte, syscallcompat.PATH_MAX)
-	n, err := syscall.Readlink("/proc/self/exe", buf)
-	if err == nil {
-		name = string(buf[:n])
-	}
-	return name
-}
-
-// forkChildMount daemonizes the mount phase. It forks a child that performs the
-// mount in the foreground (a normal "gocryptfs -fg ... CIPHERDIR MOUNTPOINT"
-// call) and feeds it the init password via stdin. The parent waits for SIGUSR1
-// (successful mount) and then exits 0, or propagates the child's exit code on
-// failure.
-func forkChildMount(mountArgs []string, password []byte) int {
-	name := selfPath()
-	childArgs := []string{"-fg", fmt.Sprintf("-notifypid=%d", os.Getpid())}
-	childArgs = append(childArgs, mountArgs[1:]...)
-	c := exec.Command(name, childArgs...)
-	c.Stdout = os.Stdout
-	c.Stderr = os.Stderr
-	stdin, err := c.StdinPipe()
-	if err != nil {
-		tlog.Fatal.Printf("forkChildMount: stdin pipe failed: %v", err)
-		return exitcodes.ForkChild
-	}
-	exitOnUsr1()
-	if err := c.Start(); err != nil {
-		tlog.Fatal.Printf("forkChildMount: starting %s failed: %v", name, err)
-		return exitcodes.ForkChild
-	}
-	// Feed the saved init password to the child. The child reads it from stdin
-	// (a pipe, hence not a terminal), unless the mount section supplied its own
-	// -extpass/-passfile, in which case this is simply ignored.
-	writePasswordToPipe(stdin, password)
-	if err := c.Wait(); err != nil {
-		if exiterr, ok := err.(*exec.ExitError); ok {
-			if ws, ok := exiterr.Sys().(syscall.WaitStatus); ok {
-				return ws.ExitStatus()
-			}
-		}
-		tlog.Fatal.Printf("forkChildMount: wait returned an unknown error: %v", err)
-		return exitcodes.ForkChild
-	}
-	return 0
-}
-
-// execMountForeground replaces the current process with a normal foreground
-// gocryptfs mount ("-fg" is already part of mountArgs), feeding the init
-// password through a pre-filled stdin pipe. Does not return on success.
-func execMountForeground(mountArgs []string, password []byte) int {
-	r, w, err := os.Pipe()
-	if err != nil {
-		tlog.Fatal.Printf("mount: pipe failed: %v", err)
-		return exitcodes.Other
-	}
-	// The password is small (< pipe buffer), so this write does not block.
-	writePasswordToPipe(w, password)
-	// Make the pipe read end our stdin (fd 0) so the new process image reads the
-	// password from it.
-	if err := syscallcompat.Dup3(int(r.Fd()), 0, 0); err != nil {
-		tlog.Fatal.Printf("mount: dup3 failed: %v", err)
-		return exitcodes.Other
-	}
-	name := selfPath()
-	if err := syscall.Exec(name, mountArgs, os.Environ()); err != nil {
-		tlog.Fatal.Printf("mount: exec failed: %v", err)
-		return exitcodes.Other
-	}
-	return 0 // unreachable
-}
-
-// writePasswordToPipe writes the password followed by a newline to w, closes w,
-// and wipes the password from memory.
-func writePasswordToPipe(w io.WriteCloser, password []byte) {
-	w.Write(password)
-	w.Write([]byte("\n"))
-	w.Close()
-	for i := range password {
-		password[i] = 0
-	}
-}
